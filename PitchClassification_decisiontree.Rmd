@@ -1,0 +1,152 @@
+---
+title: "Pitch classification with raw ball flight metrics"
+author: "Billy Lozowski"
+date: "`r Sys.Date()`"
+output:
+  word_document: default
+  html_notebook pdf_document: default
+  pdf_document: default
+  html_document:
+    df_print: paged
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, cache =T)
+```
+
+# Project Description
+
+This project will classify different pitch types from raw ball data. The goal is to establish how many different pitch types are actually being thrown, as it's currently common for a pitcher to say "I throw my X pitch like this". In fact, just because a player says they throw a fastball, might not mean they actually do when we use ball data. 
+
+## Load the data "master_Trackman_2025"
+
+The .csv file being imported contains 2 spring seasons, and 2 fall practice seasons worth of pitching data collected with Trackman. 
+
+```{r load data}
+file_path <- file.choose()
+df <- read.csv(file_path)
+```
+
+## Filter the data
+
+The Trackman data includes a number of rows that are not particularly relevant to this project. As such, we need to filter out our columns of interest. Additionally, we need to account for difference in certain ball metrics between right- and left-handed pitchers. As such, the decision of split these into separate data frames was made to avoid errors in mutating (* -1) certain variables.
+
+```{r clean data}
+library(tidyverse)
+df <- df %>%
+  select(1,2,6:9,12,15,17:22,25,29:45)
+
+df_RHP <- df %>% filter(PitcherThrows == "Right")
+df_LHP <- df %>% filter(PitcherThrows == "Left") 
+```
+
+
+
+# Decision tree example
+
+In this example we will model performance in terms of race time of an athlete based on two measures of visual function (i.e., visual acuity (VA) and contrast sensitivity (CS)). These data are simulated rather than real data. 
+
+## Load in the data
+```{r}
+Performance <- read.csv(header = TRUE, "SimData.csv")
+```
+
+### Explore the relationships between visual acuity, contrast sensitivity, and race time
+
+Visual acuity seems positively correlated to race time. 0.0 logMAR visual acuity is considered 'normal' vision and 3.5 logMAR means the athlete is fully blind. This relationship thus makes sense - athletes with more severe impairments have longer race times (i.e, poorer performance).
+
+Contrast sensitivity on the other hand seems to be negatively correlated to race time. Here, 0.0 logCS means that the athlete can not discriminate between black and white (i.e. they are fully blind). Again, athletes with more severe contrast sensitivity impairment have longer race times. 
+
+Visual acuity and contrast sensitivity are also correlated to each other. 
+
+The decision tree model can help us to decide whether we should use one or both impairment measures to set the sport class profiles; how many classes we may need; and what the sport class profiles should be.  
+
+```{r}
+plot(Performance$VA,Performance$RaceTime, ylab = "Race time (s)", xlab = "Visual acuity (logMAR)") 
+abline(lm(Performance$RaceTime~Performance$VA), col = "blue")
+plot(Performance$CS,Performance$RaceTime, ylab = "Race time (s)", xlab = "Contrast sensitivity (logCS)")
+abline(lm(Performance$RaceTime~Performance$CS), col = "blue")
+plot(Performance$VA,Performance$CS, xlab = "Visual acuity (logMAR)", ylab = "Contrast sensitivity (logCS)")
+```
+
+## Install and load the package we'll use to build the decision tree model
+
+```{r}
+install.packages("tree")
+library(tree)
+```
+
+## Create training and test set
+
+To be able to assess how well the model performs on new data (i.e. not used to develop/train the model), we should split our data into a training and a test (or validation) set. The total sample is 19668 pitches for RHP, and 10420 for LHP, so here I split this data set up in a training set of 15668 (RHP) data points and a test set of the remaining 4000 data points.
+
+__I'll repeat this process for the LHP group, but instead of a 16000:4000 split, I'll use 8000:2420 (approx. 80:20 split)__
+
+```{r }
+set.seed(1)
+Train = sample (1:nrow(df_RHP),16000)
+Test.df_RHP = df_RHP[-Train,]
+```
+
+## Build the tree
+Use the 'tree' function to build a large decision tree model using the training data that predicts performance (i.e., race time) based on the athlete's visual function (i.e, visual acuity (VA) and contrast sensitivity (CS)).
+
+The summary tells us that this tree has five terminal nodes, which would imply five different sport classes.  
+
+```{r}
+set.seed(1)
+tree = tree(RaceTime~VA + CS,Performance,subset=Train)
+summary(tree)
+```
+
+## Plot the tree
+We can also visualize the decision tree, to see how and where the different splits are made. 
+
+```{r}
+plot(tree)
+text(tree,pretty=0)
+```
+
+## Pruning
+
+The decide on the optimal size of the tree (number of terminal nodes) and thus the complexity of the model we can use cross validation. The cv.tree function does this for us. In the plot we can see that the cross validation (prediction) error decreases rapidly for the first splits and then flattens out. The optimal number of final nodes therefore is 3. This is a good indication that 3 sport classes would be sufficient and more  classes would not necessarily improve the classification system any further.
+
+
+```{r}
+set.seed(1)
+cv.performance=cv.tree(tree)
+plot(cv.performance$size,cv.performance$dev,type = 'b', xlab = "Number of terminal nodes", ylab = "cross validation error")
+```
+
+We now know that a tree with 3 terminal nodes produces the lowest cross-validation error. Thus we can now prune the tree to find the three-node tree. 
+
+This pruned tree divides our VI swimmers up in three sport classes: 
+
+*   A first split on visual acuity predicts that those swimmers with extremely poor visual acuity (>2.75 logMAR) perform worst (i.e. race time is on average 58.38 seconds).
+*   The second split divides those with visual acuity better than 2.75 logMAR in two additional sport classes. 
+    *    The first one for those with poor contrast sensitivity (<1.205 logCS), who are predicted to have a race time of 55.77 seconds. 
+    *    And a least impaired group, who have relatively good contrast sensitivity. Their race time is on average 54.09 seconds. 
+
+```{r}
+set.seed(1)
+prune.performance=prune.tree(tree,best=3)
+plot(prune.performance)
+text(prune.performance, pretty = 0)
+```
+
+## Evaluate performance of the model
+
+Now we compare the predicted race times with the actual race times from the *test* set data. The predicted race time for a particular athlete is the mean of the race times in the final node in which they are placed based on their visual acuity and contrast sensitivity. All athletes in the same node have the same predicted race time.
+
+
+```{r}
+pred.perf = predict(prune.performance,newdata=Performance[-Train,])
+plot(pred.perf,Test.Performance$RaceTime)
+abline(0,1)
+# Calculate the mean squared error 
+RMSE = sqrt (mean((pred.perf-Test.Performance$RaceTime)^2))
+```
+We see that the model predicts the race time within 1 second from the actual race time. This is not a very accurate prediction, but when compared to the differences in performance between the groups (sport classes) of ~ 1.5 seconds
+
+There are a number of ways to (e.g. random forests) to improve the decision tree model further, however the interpretability of the model likely decreases  at the same time. 
+
